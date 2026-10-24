@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pulso</title>
+<meta name="description" content="Mide la velocidad de tu internet al instante.">
+<link rel="preconnect" href="https://speed.cloudflare.com" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@300;400;500&display=swap">
+<style>
+:root{--bg:#fafafa;--fg:#111;--muted:#8a8a8a;--line:#e4e4e4;--accent:#0a7cff;
+  --mono:"Azeret Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0b0c;--fg:#f2f2f2;--muted:#777;--line:#232325;--accent:#3d9bff;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg)}
+body{font-family:var(--mono);display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:24px}
+main{display:flex;flex-direction:column;align-items:center;gap:22px;width:100%;max-width:520px}
+.label{font-size:.75rem;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);min-height:1.2em;text-align:center}
+.speed{display:flex;align-items:baseline;gap:10px}
+#num{font-size:clamp(5rem,26vw,9rem);font-weight:300;line-height:1;letter-spacing:-.05em;font-variant-numeric:tabular-nums}
+.unit{font-size:1.1rem;color:var(--muted)}
+.bar{width:min(240px,70%);height:2px;background:var(--line);overflow:hidden;border-radius:2px}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s linear}
+.more{display:flex;gap:28px;font-size:.85rem;color:var(--muted);font-variant-numeric:tabular-nums;flex-wrap:wrap;justify-content:center}
+.more b{color:var(--fg);font-weight:500}
+button{font:inherit;font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;background:none;color:var(--fg);
+  border:1px solid var(--line);border-radius:999px;padding:10px 22px;cursor:pointer}
+button:hover{border-color:var(--fg)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.err{color:#d9480f}
+footer{position:fixed;bottom:max(14px,env(safe-area-inset-bottom,0px));left:0;right:0;text-align:center;font-size:.7rem;color:var(--muted)}
+[hidden]{display:none!important}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+  <div class="label" id="label">Tu velocidad de descarga</div>
+  <div class="speed" aria-live="polite"><span id="num">0</span><span class="unit">Mbps</span></div>
+  <div class="bar"><i id="bar"></i></div>
+  <div class="more" id="more" hidden>
+    <span>Subida <b id="ul">…</b> Mbps</span>
+    <span>Ping <b id="ping">…</b> ms</span>
+  </div>
+  <button id="again" type="button" hidden>Repetir</button>
+</main>
+<footer id="foot">Servidor: Cloudflare</footer>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const BASE=new URLSearchParams(location.search).get('base')||'https://speed.cloudflare.com';
+  const STREAMS=6, DURATION=8000, WARMUP=1500;
+  const rnd=()=>Math.random().toString(36).slice(2)+Date.now().toString(36);
+  const mbps=(b,ms)=>ms>0?b*8/(ms/1000)/1e6:0;
+  const show=v=>v>=100?v.toFixed(0):v.toFixed(1);
+
+  let shown=0,target=0,live=null;
+  (function anim(){shown+=(target-shown)*0.15; if(Math.abs(target-shown)<0.05)shown=target;
+    if(live) live.textContent=show(shown); requestAnimationFrame(anim)})();
+  const progress=f=>$('bar').style.width=(Math.min(1,f)*100)+'%';
+
+  fetch(`${BASE}/meta`,{cache:'no-store'}).then(r=>r.ok?r.json():null).then(m=>{
+    if(m&&(m.city||m.colo)) $('foot').textContent=`Servidor: Cloudflare · ${m.city||m.colo}`;
+  }).catch(()=>{});
+
+  async function download(){
+    let total=0,stop=false,warmB=0,warmT=0; const ctrls=new Set(),samples=[],start=performance.now();
+    async function worker(){
+      while(!stop){
+        const c=new AbortController(); ctrls.add(c);
+        try{
+          const r=await fetch(`${BASE}/__down?bytes=25000000&r=${rnd()}`,{cache:'no-store',signal:c.signal});
+          if(!r.ok) throw new Error(r.status);
+          const rd=r.body.getReader();
+          for(;;){const {done,value}=await rd.read(); if(done||stop)break; total+=value.length}
+        }catch(e){ if(!stop) throw e } finally{ ctrls.delete(c) }
+      }
+    }
+    const t=setInterval(()=>{
+      const now=performance.now(),el=now-start;
+      samples.push([now,total]); while(samples.length>2&&now-samples[0][0]>2000) samples.shift();
+      target=mbps(total-samples[0][1],now-samples[0][0]); progress(el/DURATION);
+      if(!warmT&&el>=WARMUP){warmT=now;warmB=total}
+      if(el>=DURATION||total>=4e8){stop=true;ctrls.forEach(c=>c.abort())}
+    },200);
+    try{await Promise.all(Array.from({length:STREAMS},worker))}finally{clearInterval(t);stop=true;ctrls.forEach(c=>c.abort())}
+    const end=performance.now();
+    return warmT?mbps(total-warmB,end-warmT):mbps(total,end-start);
+  }
+
+  async function ping(n=12){
+    const ts=[];
+    for(let i=0;i<n;i++){
+      const t0=performance.now(); const r=await fetch(`${BASE}/__down?bytes=0&r=${rnd()}`,{cache:'no-store'});
+      await r.arrayBuffer(); let t=performance.now()-t0;
+      const m=/dur=([\d.]+)/.exec(r.headers.get('server-timing')||''); if(m) t=Math.max(0,t-parseFloat(m[1]));
+      ts.push(t);
+    }
+    ts.shift(); ts.sort((a,b)=>a-b); return ts[Math.floor(ts.length/2)];
+  }
+
+  let payload=null;
+  async function upload(){
+    if(!payload){payload=new Uint8Array(5e7);const s=new Uint8Array(65536);crypto.getRandomValues(s);
+      for(let o=0;o<payload.length;o+=s.length) payload.set(s.subarray(0,Math.min(s.length,payload.length-o)),o)}
+    let stop=false,sent=0; const ctrls=new Set(),start=performance.now(),done=Array.from({length:STREAMS},()=>[]);
+    const rate=since=>done.reduce((a,l)=>{const ok=l.filter(x=>x.t0>=since);
+      return a+mbps(ok.reduce((s,x)=>s+x.b,0),ok.reduce((s,x)=>s+x.t1-x.t0,0))},0);
+    async function worker(i){
+      let size=25e4;
+      while(!stop){
+        const c=new AbortController(); ctrls.add(c); const t0=performance.now();
+        try{
+          const r=await fetch(`${BASE}/__up?r=${rnd()}`,{method:'POST',body:payload.subarray(0,size),cache:'no-store',signal:c.signal});
+          if(!r.ok) throw new Error(r.status); await r.arrayBuffer();
+          const t1=performance.now(); done[i].push({t0,t1,b:size}); sent+=size;
+          if(t1-t0<1000) size=Math.min(size*2,payload.length);
+        }catch(e){ if(!stop) throw e } finally{ ctrls.delete(c) }
+      }
+    }
+    const t=setInterval(()=>{const now=performance.now(),el=now-start;
+      target=rate(Math.max(start,now-3000)); progress(el/DURATION);
+      if(el>=DURATION||sent>=1.5e8){stop=true;ctrls.forEach(c=>c.abort())}},200);
+    try{await Promise.all(done.map((_,i)=>worker(i)))}finally{clearInterval(t);stop=true;ctrls.forEach(c=>c.abort())}
+    return rate(start+WARMUP)||rate(start);
+  }
+
+  async function run(){
+    $('again').hidden=true; $('more').hidden=true; $('ul').textContent='…'; $('ping').textContent='…';
+    $('label').className='label'; $('label').textContent='Tu velocidad de descarga';
+    live=$('num'); shown=target=0; progress(0);
+    try{
+      const dl=await download(); live=null; $('num').textContent=show(dl); progress(1);
+      $('more').hidden=false;
+      $('ping').textContent=(await ping()).toFixed(0);
+      progress(0); live=$('ul'); shown=target=0;
+      const ul=await upload(); live=null; $('ul').textContent=show(ul); progress(1);
+      $('num').textContent=show(dl);
+    }catch(e){
+      live=null; $('label').className='label err'; $('label').textContent='Sin conexión con el servidor. Revisa tu internet o el bloqueador de anuncios.';
+    }
+    $('again').hidden=false;
+  }
+  $('again').addEventListener('click',run);
+  run();
+})();
+</script>
+</body>
+</html>
